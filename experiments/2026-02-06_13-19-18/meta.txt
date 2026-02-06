@@ -1,0 +1,10 @@
+robot_ip: 10.90.90.10
+seconds: 10.0
+damping: 0.0
+tau_max: 5.0
+Compare: KF(momentum->F) vs state.K_F_ext_hat_K
+KF state: x=[p(7); F(6)]
+model: p_dot = (tau_cmd + c - g) + J^T F, F_dot=0, y=p
+Qp: 0.01
+QF: 0.1
+R: 0.01
