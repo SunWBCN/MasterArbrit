@@ -68,7 +68,7 @@ def print_robot_state(state):
 def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description="Print Franka robot state")
-    parser.add_argument("--ip", type=str, default="localhost", help="Robot IP address")
+    parser.add_argument("--ip", type=str, default="10.90.90.10", help="Robot IP address")
     parser.add_argument(
         "--rate", type=float, default=0.5, help="Rate at which to print state (in Hz)"
     )

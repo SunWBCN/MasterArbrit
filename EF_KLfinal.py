@@ -26,6 +26,152 @@ def create_experiment_dir(root="experiments"):
 def clamp(x, max_abs):
     return np.clip(x, -max_abs, +max_abs)
 
+def discretize_A_B_paper(Ac: np.ndarray, Bc: np.ndarray, Ts: float):
+    """
+    Wahrburg 2015 eq. (23)
+    [Ak Bk; 0 I] = exp([Ac Bc; 0 0] * Ts)
+    """
+    n = Ac.shape[0]
+    m = Bc.shape[1]
+    M = np.block([
+        [Ac, Bc],
+        [np.zeros((m, n + m))]
+    ])
+    Md = expm(M * Ts)
+    Ak = Md[:n, :n]
+    Bk = Md[:n, n:n+m]
+    return Ak, Bk
+
+def discretize_Q_van_loan_paper(Ac: np.ndarray, Qc: np.ndarray, Ts: float):
+    """
+    Wahrburg 2015 eq. (25a)-(25c)
+
+    H = [Ac Qc; 0 -Ac^T]
+    exp(H Ts) = [M11 M12; 0 M22]
+    Qk = M12 * M11^T
+    """
+    n = Ac.shape[0]
+    H = np.block([
+        [Ac, Qc],
+        [np.zeros((n, n)), -Ac.T]
+    ])
+    M = expm(H * Ts)
+    M11 = M[:n, :n]
+    M12 = M[:n, n:]
+    Qk = M12 @ M11.T
+    return Qk
+
+def discretize_C_R_paper(Cc: np.ndarray, Rc: np.ndarray, Ts: float):
+    """
+    Wahrburg 2015 eq. (24)
+    C = Cc
+    R = (1/Ts) * Rc
+    """
+    C = Cc
+    R = Rc / Ts
+    return C, R
+
+class KalmanCCFE_Wahrburg2015:
+    """
+    Rewritten to follow Wahrburg et al. 2015 exactly (Sec. IV-A/IV-B):
+      Continuous:
+        xdot = Ac x + Bc u + w,   w ~ N(0, Qc)
+        y    = Cc x + v,          v ~ N(0, Rc)
+      Discrete (time-varying):
+        x_{k+1} = Ak x_k + Bk u_k + w_k,  w_k ~ N(0, Qk)
+        y_k     = C x_k + v_k,            v_k ~ N(0, R)
+
+    State:
+      x = [p(7); f(6)]
+    """
+
+    def __init__(self, Ts=0.005, Qc_p=1e-2, Qc_f=1e-1, Rc=1e-2, Af_alpha=0.0):
+        self.N = 7
+        self.next = 6
+        self.n = self.N + self.next
+        self.Ts = float(Ts)
+
+        # --- Continuous covariance matrices (paper uses Qc, Rc) ---
+        # Qc = diag(Qc,p, Qc,f)  (eq. (21) text around (19)(18))
+        self.Qc = np.zeros((self.n, self.n))
+        self.Qc[:self.N, :self.N] = np.eye(self.N) * float(Qc_p)
+        self.Qc[self.N:, self.N:] = np.eye(self.next) * float(Qc_f)
+
+        # Rc: continuous measurement covariance (paper's notation)
+        self.Rc = np.eye(self.N) * float(Rc)
+
+        # --- Output matrix Cc (eq. (22)) ---
+        self.Cc = np.hstack([np.eye(self.N), np.zeros((self.N, self.next))])
+
+        # --- Fading matrix Af (eq. (18)) ---
+        # paper: Af = 0 (default) OR Af = -diag(af,i) with af,i>0
+        self.Af = -float(Af_alpha) * np.eye(self.next)
+
+        # --- Kalman state init (paper suggests x0=0, P0=I) ---
+        self.x = np.zeros((self.n,))
+        self.P = np.eye(self.n)
+
+        # Cached discrete C, R (depends only on Ts if Rc fixed)
+        self.C, self.R = discretize_C_R_paper(self.Cc, self.Rc, self.Ts)
+
+    def _build_Ac_Bc(self, J: np.ndarray):
+        """
+        Build Ac, Bc per eq. (21):
+          Ac = [[0, -J^T],
+                [0, Af]]
+          Bc = [[I],
+                [0]]
+        """
+        J = np.asarray(J, dtype=float).reshape((self.next, self.N))
+        Ac = np.zeros((self.n, self.n))
+        Ac[:self.N, self.N:] = -J.T
+        Ac[self.N:, self.N:] = self.Af
+
+        Bc = np.vstack([np.eye(self.N), np.zeros((self.next, self.N))])
+        return Ac, Bc
+
+    def step(self, J, u, y):
+        """
+        One KF step following paper IV-B steps 3)-7):
+          3) discretize -> Ak, Bk, Qk
+          4) predict (27)
+          5) gain (28)
+          6) update (29)
+          7) extract fhat (30)
+        Inputs:
+          J: 6x7
+          u: tau = tau_mot + C^T dq - G - tau_fric_hat   (eq. (9), Step 2)
+          y: p = M dq                                    (Step 1)
+        Returns:
+          f_hat (6,)
+        """
+        u = np.asarray(u, dtype=float).reshape((self.N,))
+        y = np.asarray(y, dtype=float).reshape((self.N,))
+
+        # (3) Discretize using eq. (23) and (25)
+        Ac, Bc = self._build_Ac_Bc(J)
+        Ak, Bk = discretize_A_B_paper(Ac, Bc, self.Ts)            # eq. (23)
+        Qk     = discretize_Q_van_loan_paper(Ac, self.Qc, self.Ts) # eq. (25)
+
+        # (4) Predict (eq. 27)
+        x_pred = Ak @ self.x + Bk @ u
+        P_pred = Ak @ self.P @ Ak.T + Qk
+
+        # (5) Kalman gain (eq. 28)
+        S = self.C @ P_pred @ self.C.T + self.R
+        K = P_pred @ self.C.T @ np.linalg.inv(S)
+
+        # (6) Update (eq. 29)
+        innov = y - self.C @ x_pred
+        self.x = x_pred + K @ innov
+        I = np.eye(self.n)
+        # Joseph form (paper eq. 29b)
+        self.P = (I - K @ self.C) @ P_pred @ (I - K @ self.C).T + K @ self.R @ K.T
+
+        # (7) Extract fhat (eq. 30)
+        f_hat = self.x[self.N:].copy()
+        return f_hat
+
 
 def van_loan_discretize(A, Qc, dt):
     """
@@ -98,7 +244,8 @@ class KalmanWrenchFromMomentum:
           [ 0    0  ]
         """
         A = np.zeros((self.n, self.n))
-        A[:self.np, self.np:] = J.T  # (7x6)
+        A[:self.np, self.np:] = -J.T  # (7x6)
+        #A[:self.np, self.np:] = -J.T  # (7x6)
         self.A = A
 
         # Discretize (fixed dt)
@@ -162,7 +309,7 @@ def run_collect(robot_ip, seconds, damping, tau_max):
             states.append(state)
 
             # built-in 6D wrench (K frame)
-            wrench_franka_log.append(np.array(state.K_F_ext_hat_K, dtype=float).copy())
+            wrench_franka_log.append(np.array(state.O_F_ext_hat_K, dtype=float).copy())
 
         print(f"[OK] Online run finished: t={t_robot:.3f}s, N={len(states)}")
 

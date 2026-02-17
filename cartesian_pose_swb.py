@@ -112,13 +112,14 @@ def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser()
     parser.add_argument("--ip", type=str, default="10.90.90.10", help="Robot IP address")
-    parser.add_argument("--T", type=float, default=3.0, help="Total motion duration in seconds")
+    parser.add_argument("--T", type=float, default=5.0, help="Total motion duration in seconds")
     parser.add_argument(
         "--goal",
         type=float,
         nargs=16,
-        default=[0.7074, -0.7068, 0.0001, 0.0, -0.7068, -0.7074, 0.0001, 0.0, -0.0, -0.0001, -1.0, 0.0, 0.3071, -0.0, 0.5904, 1.0],
+        default=[0.7074, -0.7068, 0.0001, 0.0, -0.7068, -0.7074, 0.0001, 0.0, -0.0, -0.0001, -1.0, 0.0, 0.3071, -0.0, 0.5904, 1.0]
         #default=[0.6377, -0.4868, -0.5969, 0.0, -0.6708, -0.732, -0.1196, 0.0, -0.3787, 0.4767, -0.7933, 0.0, 0.4905, 0.035, 0.2627, 1.0]
+        #default=[0.7507, -0.6599, -0.0301, 0.0, -0.6606, -0.7502, -0.0294, 0.0, -0.0032, 0.0419, -0.9991, 0.0, 0.5012, 0.0154, 0.0600, 1.0]
     )
     args = parser.parse_args()
 

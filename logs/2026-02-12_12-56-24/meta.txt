@@ -1,0 +1,20 @@
+Two-stage contact experiment (NO gravity)
+Dp_ori: 6.0
+Dp_xyz: 70.0
+Ki_x: 80.0
+Ki_y: 80.0
+Ki_z: 120.0
+Kp_ori: 20.0
+Kp_xyz: 600.0
+Tmove: 4.0
+eint_max: 0.03
+goal: [0.7074, -0.7068, 0.0001, 0.0, -0.7068, -0.7074, 0.0001, 0.0, -0.0, -0.0001, -1.0, 0.0, 0.3071, -0.0, 0.5904, 1.0]
+hold_time: 8.0
+ip: 10.90.90.10
+log_root: logs
+max_tau_rate: 350.0
+penetration: -0.01
+ramp_time: 3.0
+tau_max: 25.0
+wait_time: 1.0
+run_dir: /workspaces/pylibfranka/swb/logs/2026-02-12_12-56-24
