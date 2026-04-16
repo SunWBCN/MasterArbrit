@@ -18,7 +18,7 @@ def cosine_s_curve(q0: np.ndarray, qf: np.ndarray, t: float, T: float) -> np.nda
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--ip", type=str, required=True, help="Robot IP address (e.g., 10.90.90.10)")
-    parser.add_argument("--T", type=float, default=5.0, help="Total motion duration in seconds")
+    parser.add_argument("--T", type=float, default=3.0, help="Total motion duration in seconds")
     parser.add_argument("--tol", type=float, default=1e-2, help="Stop tolerance in joint space (rad)")
     parser.add_argument(
         "--goal",

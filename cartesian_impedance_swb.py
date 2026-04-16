@@ -118,8 +118,8 @@ def main():
         "--goal",
         type=float,
         nargs=16,
-        default=[0.7074, -0.7068, 0.0001, 0.0, -0.7068, -0.7074, 0.0001, 0.0, -0.0, -0.0001, -1.0, 0.0, 0.3071, -0.0, 0.5904, 1.0],
-        #default=[0.6377, -0.4868, -0.5969, 0.0, -0.6708, -0.732, -0.1196, 0.0, -0.3787, 0.4767, -0.7933, 0.0, 0.4905, 0.035, 0.2627, 1.0]
+        #default=[0.7074, -0.7068, 0.0001, 0.0, -0.7068, -0.7074, 0.0001, 0.0, -0.0, -0.0001, -1.0, 0.0, 0.3071, -0.0, 0.5904, 1.0],
+        default=[0.6377, -0.4868, -0.5969, 0.0, -0.6708, -0.732, -0.1196, 0.0, -0.3787, 0.4767, -0.7933, 0.0, 0.4905, 0.035, 0.2627, 1.0]
     )    
     parser.add_argument("--plot", action="store_true", help="Save plots after motion")
     parser.add_argument("--outdir", type=str, default="cartesian_impedance", help="Output directory for plots/logs")
@@ -127,13 +127,21 @@ def main():
 
     robot = Robot(args.ip)
 
+    # Set collision behavior and load model BEFORE starting torque control
+    robot.set_collision_behavior(
+        [100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0],
+        [100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0],
+        [100.0, 100.0, 100.0, 100.0, 100.0, 100.0],
+        [100.0, 100.0, 100.0, 100.0, 100.0, 100.0],
+    )
+    model = robot.load_model()
+
     print("WARNING: Torque control will move the robot!")
     input("Press Enter to continue...")
 
     active = robot.start_torque_control()
 
     state, _ = active.readOnce()
-    model = robot.load_model()
     initial_cartesian_pose = state.O_T_EE.copy()
     target_cartesian_pose = np.array(args.goal, dtype=float)
 
@@ -152,13 +160,6 @@ def main():
     T = args.T
 
     try:
-        # Set default behavior
-        robot.set_collision_behavior(
-            [100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0],
-            [100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0],
-            [100.0, 100.0, 100.0, 100.0, 100.0, 100.0],
-            [100.0, 100.0, 100.0, 100.0, 100.0, 100.0],
-        )
 
         while True:
             state, dt = active.readOnce()
