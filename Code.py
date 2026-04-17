@@ -222,7 +222,7 @@ class KalmanCCFE_Wahrburg2015:
     def _build_Ac_Bc(self, J):
         J = np.asarray(J, dtype=float).reshape((self.nf, self.N))
         Ac = np.zeros((self.n, self.n))
-        Ac[:self.N, self.N:] = -J.T
+        Ac[:self.N, self.N:] = J.T
         Ac[self.N:, self.N:] = self.Af
         Bc = np.vstack([np.eye(self.N), np.zeros((self.nf, self.N))])
         return Ac, Bc
@@ -243,6 +243,63 @@ class KalmanCCFE_Wahrburg2015:
         self.P = (I - K @ self.C) @ P_pred @ (I - K @ self.C).T + K @ self.R @ K.T
 
         return self.x[self.N:].copy()
+
+
+# ============================================================
+# High-Gain Observer (momentum-based)
+# ============================================================
+
+def err_mapping_func(err, alg):
+    """Map momentum error to L1/L2 injection signals.
+
+    alg = 'linear'  : pure high-gain (L1*err, L2*err)
+    alg = 'sos'     : super-twisting / SOS (L1*|e|^0.5*sign(e), L2*sign(e))
+    alg = 'sliding' : first-order sliding mode (L1*sign(e), L2*sign(e))
+    """
+    if alg == "linear":
+        return err, err
+    elif alg == "sos":
+        err1 = np.sign(err) * np.sqrt(np.abs(err))
+        err2 = np.sign(err)
+        return err1, err2
+    elif alg == "sliding":
+        s = np.sign(err)
+        return s, s
+    else:
+        raise ValueError(f"Unknown hg_alg: {alg!r}. Choose linear / sos / sliding.")
+
+
+class HighGainObserver:
+    """Momentum-based high-gain observer.
+
+    Dynamics (continuous, Euler-integrated):
+        p_hat_dot = tau + C^T v - g + tau_ext_hat + L1 * err1
+        tau_ext_hat_dot = L2 * err2
+    where err = M @ v - p_hat  (momentum error)
+    """
+
+    def __init__(self, dt, nv=7, bandwidth=10.0, alg="linear"):
+        self.dt  = float(dt)
+        self.nv  = nv
+        self.alg = alg
+        bw = np.full(nv, bandwidth)
+        self.L1 = np.diag(2.0 * bw)
+        self.L2 = np.diag(bw ** 2)
+        self.est_gm      = np.zeros(nv)   # estimated generalized momentum
+        self.est_ext_tau = np.zeros(nv)   # estimated external joint torque
+
+    def update(self, v, M, C, g, tau_motor):
+        err = M @ v - self.est_gm
+        err1, err2 = err_mapping_func(err, self.alg)
+        dgm          = tau_motor + C.T @ v - g + self.est_ext_tau + self.L1 @ err1
+        dest_ext_tau = self.L2 @ err2
+        self.est_gm      += self.dt * dgm
+        self.est_ext_tau += self.dt * dest_ext_tau
+        return self.est_ext_tau.copy(), self.est_gm.copy()
+
+    def reset(self):
+        self.est_gm[:]      = 0.0
+        self.est_ext_tau[:] = 0.0
 
 
 # ============================================================
@@ -425,7 +482,8 @@ def run_collect(robot_ip,
 # ============================================================
 
 def offline_kf_and_plots(model, t, tau_meas, states, wrench_franka,
-                         exp_dir, dt_kf, Qp, QF, R, Af, use_gravity):
+                         exp_dir, dt_kf, Qp, QF, R, Af, use_gravity,
+                         observer="ccfe", hg_bandwidth=10.0, hg_alg="linear"):
     if len(states) == 0 or len(t) == 0:
         print("[ERROR] No samples for offline KF.")
         return
@@ -433,13 +491,14 @@ def offline_kf_and_plots(model, t, tau_meas, states, wrench_franka,
     pin_model = pin.buildModelFromUrdf(FRANKA_URDF)
     pin_data  = pin_model.createData()
 
-    kf = KalmanCCFE_Wahrburg2015(
-        Ts=dt_kf,
-        Qc_p=Qp,
-        Qc_f=QF,
-        Rc=R,
-        Af_alpha=Af,
-    )
+    if observer == "ccfe":
+        obs = KalmanCCFE_Wahrburg2015(Ts=dt_kf, Qc_p=Qp, Qc_f=QF, Rc=R, Af_alpha=Af)
+        obs_label = "CCFE-KF"
+    elif observer == "hgo":
+        obs = HighGainObserver(dt=dt_kf, nv=7, bandwidth=hg_bandwidth, alg=hg_alg)
+        obs_label = f"HGO({hg_alg})"
+    else:
+        raise ValueError(f"Unknown observer: {observer!r}. Choose ccfe or hgo.")
 
     t_end = float(t[-1])
     t_grid = np.arange(0.0, t_end, dt_kf)
@@ -469,14 +528,17 @@ def offline_kf_and_plots(model, t, tau_meas, states, wrench_franka,
 
         p_meas = M @ dq
 
-        # u = tau_meas - h, h = coriolis (gravity already compensated by FR3 internally)
+        # u = tau_meas + C^T*dq - g  (momentum formulation, gravity always subtracted)
         u = tau_meas[idx] + C_mat.T @ dq - g
-        if use_gravity:
-            u -= g
 
-        f_hat = kf.step(J=J, u=u, y=p_meas)
+        if observer == "ccfe":
+            f_hat = obs.step(J=J, u=u, y=p_meas)
+        else:  # hgo
+            tau_ext_hat, _ = obs.update(v=dq, M=M, C=C_mat, g=g, tau_motor=tau_meas[idx])
+            # Map joint-space torques to Cartesian wrench: f = J^{T+} @ tau_ext
+            f_hat, _, _, _ = np.linalg.lstsq(J.T, tau_ext_hat, rcond=None)
 
-        wrench_kf.append(f_hat)
+        wrench_kf.append( - f_hat)
         wrench_franka_ds.append(wrench_franka[idx])
         t_use.append(t[idx])
         tau_used.append(tau_meas[idx].copy())
@@ -486,12 +548,13 @@ def offline_kf_and_plots(model, t, tau_meas, states, wrench_franka,
     t_use = np.array(t_use)
 
     np.savez(
-        os.path.join(exp_dir, "log_offline_ccfe.npz"),
+        os.path.join(exp_dir, f"log_offline_{observer}.npz"),
         t=t_use,
         wrench_kf=wrench_kf,
         wrench_franka=wrench_franka_ds,
         tau_meas=np.vstack(tau_used),
         dt_kf=float(dt_kf),
+        observer=observer,
         Qp=Qp,
         QF=QF,
         R=R,
@@ -507,7 +570,7 @@ def offline_kf_and_plots(model, t, tau_meas, states, wrench_franka,
         for i in idxs:
             plt.plot(t_use, wrench_franka_ds[:, i], "--", alpha=0.6,
                      label=f"{labels[i]} Franka")
-            plt.plot(t_use, wrench_kf[:, i], label=f"{labels[i]} CCFE-KF")
+            plt.plot(t_use, wrench_kf[:, i], label=f"{labels[i]} {obs_label}")
         plt.title(title)
         plt.xlabel("Time [s]")
         plt.ylabel(ylab)
@@ -527,7 +590,7 @@ def offline_kf_and_plots(model, t, tau_meas, states, wrench_franka,
 
     plt.figure(figsize=(10, 4))
     plt.plot(t_use, fn_franka, "--", alpha=0.7, label="||F|| Franka")
-    plt.plot(t_use, fn_kf, label="||F|| CCFE-KF")
+    plt.plot(t_use, fn_kf, label=f"||F|| {obs_label}")
     plt.title("Force magnitude comparison")
     plt.xlabel("Time [s]")
     plt.ylabel("N")
@@ -542,7 +605,7 @@ def offline_kf_and_plots(model, t, tau_meas, states, wrench_franka,
         plt.plot(t_use, wrench_franka_ds[:, i], "--", alpha=0.7,
                  label=f"{labels[i]} Franka")
         plt.plot(t_use, wrench_kf[:, i],
-                 label=f"{labels[i]} CCFE-KF")
+                 label=f"{labels[i]} {obs_label}")
         plt.title(f"{labels[i]} comparison")
         plt.xlabel("Time [s]")
         plt.ylabel(units[i])
@@ -552,7 +615,7 @@ def offline_kf_and_plots(model, t, tau_meas, states, wrench_franka,
         plt.savefig(os.path.join(exp_dir, f"compare_{labels[i]}.png"), dpi=200)
         plt.close()
 
-    print(f"[OK] Offline CCFE results saved to: {exp_dir}")
+    print(f"[OK] Offline {obs_label} results saved to: {exp_dir}")
 
 
 # ============================================================
@@ -582,6 +645,13 @@ def main():
 
     parser.add_argument("--use-gravity", action="store_true")
     parser.add_argument("--outroot", default="experiments")
+
+    parser.add_argument("--observer", choices=["ccfe", "hgo"], default="ccfe",
+                        help="Observer type: ccfe (Kalman CCFE) or hgo (High-Gain)")
+    parser.add_argument("--hg-bandwidth", type=float, default=50.0,
+                        help="HGO bandwidth (rad/s), used when --observer hgo")
+    parser.add_argument("--hg-alg", choices=["linear", "sos", "sliding"], default="linear",
+                        help="HGO injection algorithm")
 
     args = parser.parse_args()
 
@@ -621,7 +691,10 @@ def main():
         logs["wrench_franka"],
         exp_dir,
         args.dt_kf,
-        Qp, QF, R, Af, args.use_gravity
+        Qp, QF, R, Af, args.use_gravity,
+        observer=args.observer,
+        hg_bandwidth=args.hg_bandwidth,
+        hg_alg=args.hg_alg,
     )
 
     print("✅ Done:", exp_dir)
